@@ -15,12 +15,351 @@
 
 pragma language_version >= 0.16 && <= 0.17;
 
+
 import CompactStandardLibrary;
+import "./Ownable" prefix Ownable_;
 
-// public state
-export ledger round: Counter;
 
-// transition function changing public state
-export circuit increment(): [] {
-  round.increment(1);
+// (Optional: re-export for TS tests)
+// export { ZswapCoinPublicKey, ContractAddress, Either };
+
+
+
+
+// =====================
+// ====== Types ========
+// =====================
+export struct Attestation {
+ epoch: Uint<64>;
+ adult: Uint<1>;       // 1 if meets legal age
+ inCountry: Uint<1>;   // 1 if belongs to the allowed country (e.g., "AR")
+ net_pay: Uint<1>; // 1 if net pay is above threshold
+ gender: Uint<1>;  // 1 if the gender is according to policy
+
+}
+
+export enum Gender {
+ MALE,
+ FEMALE,
+ UNSET
+}
+// =====================
+// ====== Ledger =======
+// =====================
+export ledger epoch: Counter;
+export ledger instance: Counter;
+export ledger attest: Map<Bytes<32>, Attestation>;
+
+
+// Public policy: allowed country (ISO alpha-2, 2 bytes). If "\x00\x00", it's unset.
+// Minimum allowed age (in years). If 0, it's unset.
+// Allowed country and age are set by the contract owner (governance).
+// Allows to version policies by bumping the epoch.
+// Users can enroll once, and then upgrade their adult flag or refresh their country flag.
+export ledger allowedCountry: Bytes<32>; // name as Bytes<32> for simplicity
+export ledger allowedMinAge: Uint<32>; // in years
+export ledger allowedNetPay: Uint<32>; // in thousands of USD
+export ledger allowedGender: Gender; // e.g., "FEMALE"
+
+
+
+
+// =====================
+// ===== Witnesses =====
+// =====================
+witness userSecretKey(): Bytes<32>;
+witness userAgeBytes(): Bytes<32>;
+witness userCountryAlpha2(): Bytes<32>;   // e.g., "United states of america" as Bytes<32>
+witness userNetPay(): Bytes<32>; // in thousands of USD
+witness userGender(): Gender;  //
+
+
+
+
+// ==========================
+// ====== Constructor =======
+// ==========================
+constructor(initialOwner: Either<ZswapCoinPublicKey, ContractAddress>) {
+ instance.increment(1 as Uint<16>);
+ epoch.increment(1 as Uint<16>);
+ Ownable_initialize(initialOwner);
+
+
+ // Defaults on deploy:
+ allowedCountry = disclose(pad(32, "United states of america") as Bytes<32>);
+ allowedMinAge  = disclose(21 as Uint<8>); // 21 years
+ allowedNetPay  = disclose(3 as Uint<8>);  // 3k USD
+ allowedGender  = disclose(Gender.FEMALE);  // FEMALE
+}
+
+
+
+
+// =====================
+// ===== Helpers =======
+// =====================
+export pure circuit publicKey(inst: Bytes<32>, sk: Bytes<32>): Bytes<32> {
+ return persistentHash<Vector<3, Bytes<32>>>([pad(32, "eclipse_proof:pk"), inst, sk]);
+}
+circuit userUPk(): Bytes<32> {
+ const instB = (instance as Field) as Bytes<32>;
+ return publicKey(instB, userSecretKey());
+}
+
+
+
+
+// ===============================
+// ===== Admin (governance) ======
+// ===============================
+export circuit bumpEpoch(): [] {
+ Ownable_assertOnlyOwner();
+ epoch.increment(1 as Uint<16>);
+}
+
+
+export circuit revokeUpk(uPk: Bytes<32>): [] {
+ Ownable_assertOnlyOwner();
+ assert(attest.member(disclose(uPk)), "no record");
+ attest.remove(disclose(uPk));
+}
+
+
+export circuit setAdultFlag(uPk: Bytes<32>, v: Uint<1>): [] {
+ Ownable_assertOnlyOwner();
+ assert(attest.member(disclose(uPk)), "no record");
+ const cur = attest.lookup(disclose(uPk));
+ attest.insert(disclose(uPk), disclose(Attestation {
+   epoch: cur.epoch, adult: v, inCountry: cur.inCountry, net_pay: cur.net_pay, gender: cur.gender
+ }));
+}
+
+
+export circuit setCountryFlag(uPk: Bytes<32>, v: Uint<1>): [] {
+ Ownable_assertOnlyOwner();
+ assert(attest.member(disclose(uPk)), "no record");
+ const cur = attest.lookup(disclose(uPk));
+ attest.insert(disclose(uPk), disclose(Attestation {
+   epoch: cur.epoch, adult: cur.adult, inCountry: v, net_pay: cur.net_pay, gender: cur.gender
+ }));
+}
+
+export circuit setNetPayFlag(uPk: Bytes<32>, v: Uint<1>): [] {
+ Ownable_assertOnlyOwner();
+ assert(attest.member(disclose(uPk)), "no record");
+ const cur = attest.lookup(disclose(uPk));
+ attest.insert(disclose(uPk), disclose(Attestation {
+   epoch: cur.epoch, adult: cur.adult, inCountry: cur.inCountry, net_pay: v, gender: cur.gender
+ }));
+}
+
+export circuit setGenderFlag(uPk: Bytes<32>, v: Uint<1>): [] {
+ Ownable_assertOnlyOwner();
+ assert(attest.member(disclose(uPk)), "no record");
+ const cur = attest.lookup(disclose(uPk));
+ attest.insert(disclose(uPk), disclose(Attestation {
+   epoch: cur.epoch, adult: cur.adult, inCountry: cur.inCountry, net_pay: cur.net_pay, gender: v
+ }));
+}
+
+export circuit setAllowedMinAge(age: Uint<8>): [] {
+ Ownable_assertOnlyOwner();
+ assert(age > (0 as Uint<8>), "age must be > 0");
+ allowedMinAge = disclose(age);
+}
+
+
+export circuit setAllowedCountry(country: Bytes<32>): [] {
+ Ownable_assertOnlyOwner();
+ allowedCountry = disclose(country);
+ // optional: version policies
+ epoch.increment(1 as Uint<16>);
+}
+
+export circuit setAllowedNetPay(net_pay: Uint<8>): [] {
+ Ownable_assertOnlyOwner();
+ assert(net_pay > (0 as Uint<8>), "net pay must be > 0");
+ allowedNetPay = disclose(net_pay);
+}
+
+export circuit setAllowedGender(gender: Gender): [] {
+ Ownable_assertOnlyOwner();
+ allowedGender = disclose(gender);
+}
+
+
+// ===========================
+// ===== Reads / Utils =======
+// ===========================
+export circuit getEpoch(): Uint<64> { return (epoch as Field) as Uint<64>; }
+export circuit getInstanceBytes(): Bytes<32> { return (instance as Field) as Bytes<32>; }
+export circuit getAllowedCountry(): Bytes<32> { return allowedCountry; }
+export circuit getAllowedMinAge(): Uint<32> { return allowedMinAge; }
+export circuit getAllowedNetPay(): Uint<32> { return allowedNetPay; }
+export circuit getAllowedGender(): Gender { return allowedGender; }
+
+
+
+
+// ===================================
+// ===== Enroll / Upgrade / Refresh ===
+// ===================================
+export circuit enrollOnce(): [] {
+ // Policies must be set
+ assert(!(allowedCountry == pad(32, "")), "country policy unset");
+ assert(allowedMinAge > (0 as Uint<8>), "age policy unset");
+ assert(allowedNetPay > (0 as Uint<8>), "net pay policy unset"); 
+ assert(!(allowedGender == Gender.UNSET)," gender policy unset");
+
+
+ const uPk = userUPk();
+ assert(!attest.member(disclose(uPk)), "already enrolled");
+
+
+ // Adult flag according to on-chain policy
+ const age8 = ((userAgeBytes() as Field) as Uint<16>) as Uint<8>;
+ const adultBit = (age8 >= allowedMinAge) ? (1 as Uint<1>) : (0 as Uint<1>);
+
+
+ // Country flag according to on-chain policy
+ const inCountryBit = (userCountryAlpha2() == allowedCountry)
+   ? (1 as Uint<1>) : (0 as Uint<1>);
+ // Net pay flag according to on-chain policy
+ const netPay8 = ((userNetPay() as Field) as Uint<16>) as Uint<8>;
+ const netPayBit = (netPay8 >= allowedNetPay) ? (1 as Uint<1>) : (0 as Uint<1>);
+ // Update gender flag according to on-chain policy
+ const genderBit = (userGender() == allowedGender) ? (1 as Uint<1>) : (0 as Uint<1>);
+
+ const e = (epoch as Field) as Uint<64>;
+ attest.insert(disclose(uPk), disclose(Attestation {
+   epoch: e, adult: adultBit, inCountry: inCountryBit, net_pay: netPayBit, gender: genderBit
+ }));
+}
+
+
+export circuit selfUpgradeToAdult(): [] {
+ const uPk = userUPk();
+ assert(attest.member(disclose(uPk)), "no record");
+ const cur = attest.lookup(disclose(uPk));
+ assert(cur.adult == (0 as Uint<1>), "already adult"); // check if upgrade needed or logic error
+ // Policy must be set
+
+
+ assert(allowedMinAge > (0 as Uint<8>), "age policy unset");
+ const age8 = ((userAgeBytes() as Field) as Uint<16>) as Uint<8>;
+ assert(age8 >= allowedMinAge, "age policy failed");
+
+
+ const e = (epoch as Field) as Uint<64>;
+ attest.insert(disclose(uPk), disclose(Attestation {
+   epoch: e, adult: 1 as Uint<1>, inCountry: cur.inCountry, net_pay: cur.net_pay, gender: cur.gender
+ }));
+}
+
+
+// Recompute only the country flag with the current witness (e.g., residency/policy changes)
+export circuit selfRefreshCountry(): [] {
+ assert(!(allowedCountry == pad(32, "")), "country policy unset");
+
+
+ const uPk = userUPk();
+ assert(attest.member(disclose(uPk)), "no record");
+ const cur = attest.lookup(disclose(uPk));
+
+
+ const isIn = userCountryAlpha2() == allowedCountry;
+ const inCountryBit = isIn ? (1 as Uint<1>) : (0 as Uint<1>);
+ const e = (epoch as Field) as Uint<64>;
+
+
+ attest.insert(disclose(uPk), disclose(Attestation {
+   epoch: e, adult: cur.adult, inCountry: inCountryBit, net_pay: cur.net_pay, gender: cur.gender
+ }));
+}
+
+
+
+
+// ===========================
+// ========= Queries =========
+// ===========================
+export circuit checkAdultByUpk(uPk: Bytes<32>): Uint<1> {
+ assert(attest.member(disclose(uPk)), "no record");
+ return attest.lookup(disclose(uPk)).adult;
+}
+
+
+export circuit checkCountryByUpk(uPk: Bytes<32>): Uint<1> {
+ assert(attest.member(disclose(uPk)), "no record");
+ return attest.lookup(disclose(uPk)).inCountry;
+}
+
+export circuit checkNetPayByUpk(uPk: Bytes<32>): Uint<1> {
+ assert(attest.member(disclose(uPk)), "no record");
+ return attest.lookup(disclose(uPk)).net_pay;
+}
+
+
+export circuit checkGenderByUpk(uPk: Bytes<32>): Uint<1> {
+ assert(attest.member(disclose(uPk)), "no record");
+ return attest.lookup(disclose(uPk)).gender;
+}
+
+export circuit checkEligibleByUpk(uPk: Bytes<32>): Uint<1> {
+ assert(attest.member(disclose(uPk)), "no record");
+ const a = attest.lookup(disclose(uPk));
+ const ok = (a.adult == (1 as Uint<1>) && a.inCountry == (1 as Uint<1>) && a.net_pay == (1 as Uint<1>) && a.gender == (1 as Uint<1>))
+   ? (1 as Uint<1>) : (0 as Uint<1>);
+ return ok;
+}
+
+
+export circuit checkAdultSelf(): Uint<1> {
+ const uPk = userUPk();
+ assert(attest.member(disclose(uPk)), "no record");
+ return disclose(attest.lookup(disclose(uPk)).adult);
+}
+
+
+export circuit checkCountrySelf(): Uint<1> {
+ const uPk = userUPk();
+ assert(attest.member(disclose(uPk)), "no record");
+ return disclose(attest.lookup(disclose(uPk)).inCountry);
+}
+
+export circuit checkNetPaySelf(): Uint<1> {
+ const uPk = userUPk();
+ assert(attest.member(disclose(uPk)), "no record");
+ return disclose(attest.lookup(disclose(uPk)).net_pay);
+}
+
+export circuit checkGenderSelf(): Uint<1> {
+ const uPk = userUPk();
+ assert(attest.member(disclose(uPk)), "no record");
+ return disclose(attest.lookup(disclose(uPk)).gender);
+}
+
+export circuit checkEligibleSelf(): Uint<1> {
+ const uPk = userUPk();
+ assert(attest.member(disclose(uPk)), "no record");
+ const a = attest.lookup(disclose(uPk));
+ const ok = (a.adult == (1 as Uint<1>) && a.inCountry == (1 as Uint<1>) && a.net_pay == (1 as Uint<1>) && a.gender == (1 as Uint<1>))
+   ? (1 as Uint<1>) : (0 as Uint<1>);
+ return disclose(ok);
+}
+
+
+
+
+// ===============================
+// ===== Ownable (helpers) =======
+// ===============================
+export circuit owner(): Either<ZswapCoinPublicKey, ContractAddress> {
+ return Ownable_owner();
+}
+export circuit transferOwnership(newOwner: Either<ZswapCoinPublicKey, ContractAddress>): [] {
+ Ownable_transferOwnership(newOwner);
+}
+export circuit renounceOwnership(): [] {
+ Ownable_renounceOwnership();
 }
