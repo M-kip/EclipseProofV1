@@ -16,7 +16,7 @@ jobs:
       contents: read             # we only need to checkout code
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  #v5.0.0
